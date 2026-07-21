@@ -53,6 +53,14 @@ if re.fullmatch(r"-?\d+", TG_GROUP_ID):
 TG_TOPIC_ID = os.environ.get("TG_TOPIC_ID")  # opsional: ID topic (forum topics) tempat Zeta AI kirim sinyal
 TG_TOPIC_ID = int(TG_TOPIC_ID) if TG_TOPIC_ID else None
 
+# Opsional, buat TESTING doang: kalau di-set (misal "7"), run ini CUMA narik pesan
+# dari N hari terakhir (pakai filter tanggal langsung ke Telegram), bukan dari cursor
+# tersimpan. Cursor tetap ke-update normal di akhir run, jadi run BERIKUTNYA (tanpa
+# env var ini) otomatis lanjut incremental dari situ -- gak perlu reset manual lagi.
+# JANGAN di-set permanen di production; ini cuma buat mempercepat/verifikasi 1x run.
+BACKFILL_SINCE_DAYS = os.environ.get("BACKFILL_SINCE_DAYS")
+BACKFILL_SINCE_DAYS = int(BACKFILL_SINCE_DAYS) if BACKFILL_SINCE_DAYS else None
+
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 SUPABASE_USER_ID = os.environ["SUPABASE_USER_ID"]  # user_id (uuid) pemilik data di semua tabel
@@ -490,7 +498,14 @@ def main():
         # get_dialogs() dulu supaya entity grup ke-cache buat run ini.
         client.get_dialogs()
 
-        iter_kwargs = dict(min_id=last_id, reverse=True)
+        iter_kwargs = dict(reverse=True)
+        if BACKFILL_SINCE_DAYS is not None:
+            from datetime import timedelta
+            cutoff = datetime.now(timezone.utc) - timedelta(days=BACKFILL_SINCE_DAYS)
+            iter_kwargs["offset_date"] = cutoff
+            log.info(f"Mode testing: cuma narik pesan sejak {cutoff.isoformat()} ({BACKFILL_SINCE_DAYS} hari terakhir)")
+        else:
+            iter_kwargs["min_id"] = last_id
         if TG_TOPIC_ID is not None:
             # Filter cuma pesan di dalam topic tertentu (forum topics) — kalau gak di-set,
             # ambil dari SELURUH grup (termasuk topic lain / general), yang keliru kalau
@@ -507,10 +522,17 @@ def main():
     failed_msg_ids = []
 
     for m in messages:
-        if not m.text:
+        # PENTING: pakai raw_text, BUKAN m.text. Telethon `.text` merender ulang pesan
+        # sebagai Markdown (bold jadi **Symbol**, dst) sesuai entity formatting yang
+        # dipakai bot. Semua regex parser di sini didesain buat teks POLOS (persis
+        # seperti JSON export Telegram Desktop, yang gak nyisipin tanda ** literal).
+        # Salah pakai `.text` bikin semua field gagal ke-extract (Symbol: dst gak
+        # ketemu karena teks aslinya "**Symbol**:", bukan "Symbol:").
+        raw = m.raw_text
+        if not raw:
             max_id_seen = max(max_id_seen, m.id)
             continue
-        text = m.text
+        text = raw
         date_iso = m.date.astimezone(timezone.utc).isoformat()
 
         try:

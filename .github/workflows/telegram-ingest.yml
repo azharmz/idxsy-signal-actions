@@ -13,7 +13,13 @@ on:
     - cron: '0,15,30,45 5,6,7,8 * * 1-5'
     - cron: '0,15 9 * * 1-5'
 
-  workflow_dispatch: {}   # manual trigger, PAKAI INI DULU buat testing sebelum andelin schedule
+  workflow_dispatch:   # manual trigger, PAKAI INI DULU buat testing sebelum andelin schedule
+    inputs:
+      backfill_days:
+        description: 'Testing: cuma narik pesan N hari terakhir (kosongin buat full/incremental normal)'
+        required: false
+        type: string
+        default: ''
 
 jobs:
   ingest:
@@ -40,3 +46,4 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           SUPABASE_USER_ID: ${{ secrets.SUPABASE_USER_ID }}
+          BACKFILL_SINCE_DAYS: ${{ inputs.backfill_days }}
