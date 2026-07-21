@@ -60,17 +60,26 @@ tambahin semua ini:
 | `TG_API_HASH` | dari my.telegram.org |
 | `TG_SESSION_STRING` | hasil dari Langkah 2 |
 | `TG_GROUP_ID` | username grup (`@namagrup`) atau numeric ID grup Zeta AI |
+| `TG_TOPIC_ID` | ID topic (forum topics) tempat Zeta AI kirim sinyal — cari pakai `find_group_id.ipynb` (Cell 3) |
 | `SUPABASE_URL` | URL project Supabase kamu |
 | `SUPABASE_SERVICE_KEY` | service role key Supabase (bukan anon key — butuh akses insert langsung) |
 | `SUPABASE_USER_ID` | **`1c744f4e-b811-44a9-a9a1-1977ec508700`** (sudah saya ambil dari data kamu yang ada sekarang, supaya data ingestion baru nyambung ke data lama) |
 
-### Cara dapetin `TG_GROUP_ID`
+### Cara dapetin `TG_GROUP_ID` dan `TG_TOPIC_ID`
 
-Kalau grupnya punya username publik (`t.me/namagrup`), tinggal pakai
-`@namagrup`. Kalau grup private tanpa username, perlu numeric ID — cara
-paling gampang: jalanin script kecil pakai session string yang sama
-(`client.get_dialogs()`), cari nama grupnya, catat `.id`-nya. Kalau butuh,
-saya bisa buatin script kecil ini juga.
+Karena grup Zeta AI kamu pakai fitur **Topics** (forum topics — sinyal
+dikirim di topic khusus, bukan di chat umum), butuh 2 informasi:
+`TG_GROUP_ID` (ID grupnya) dan `TG_TOPIC_ID` (ID topic spesifik tempat
+sinyal dikirim).
+
+Pakai notebook `find_group_id.ipynb` (sudah saya siapkan):
+1. Cell 2 → nampilin daftar semua grup/channel kamu, cari grup Zeta AI, catat `id=...` → `TG_GROUP_ID`.
+2. Cell 3 → masukin `GROUP_ID` yang barusan didapat, nanti nampilin daftar topic di dalam grup itu, cari topic yang isinya sinyal → catat `topic_id=...` → `TG_TOPIC_ID`.
+
+Kalau grup kamu **ternyata gak pakai Topics** (cuma chat biasa), `TG_TOPIC_ID`
+boleh dikosongin / gak usah diisi sama sekali — `ingest.py` sudah didesain
+buat handle 2 kasus ini (kalau `TG_TOPIC_ID` gak di-set, ambil dari seluruh
+grup seperti biasa).
 
 ## Langkah 4 — Test manual dulu (JANGAN langsung andelin jadwal otomatis)
 

@@ -48,6 +48,8 @@ TG_API_ID = int(os.environ["TG_API_ID"])
 TG_API_HASH = os.environ["TG_API_HASH"]
 TG_SESSION_STRING = os.environ["TG_SESSION_STRING"]
 TG_GROUP_ID = os.environ["TG_GROUP_ID"]  # username (@grup) atau numeric ID grup
+TG_TOPIC_ID = os.environ.get("TG_TOPIC_ID")  # opsional: ID topic (forum topics) tempat Zeta AI kirim sinyal
+TG_TOPIC_ID = int(TG_TOPIC_ID) if TG_TOPIC_ID else None
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
@@ -480,7 +482,13 @@ def main():
     log.info(f"Mulai dari msg_id > {last_id}")
 
     with TelegramClient(StringSession(TG_SESSION_STRING), TG_API_ID, TG_API_HASH) as client:
-        messages = list(client.iter_messages(TG_GROUP_ID, min_id=last_id, reverse=True))
+        iter_kwargs = dict(min_id=last_id, reverse=True)
+        if TG_TOPIC_ID is not None:
+            # Filter cuma pesan di dalam topic tertentu (forum topics) — kalau gak di-set,
+            # ambil dari SELURUH grup (termasuk topic lain / general), yang keliru kalau
+            # grupnya emang pakai topics dan sinyal cuma ada di 1 topic spesifik.
+            iter_kwargs["reply_to"] = TG_TOPIC_ID
+        messages = list(client.iter_messages(TG_GROUP_ID, **iter_kwargs))
 
     log.info(f"Ambil {len(messages)} pesan baru")
     if not messages:
