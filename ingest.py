@@ -48,6 +48,8 @@ TG_API_ID = int(os.environ["TG_API_ID"])
 TG_API_HASH = os.environ["TG_API_HASH"]
 TG_SESSION_STRING = os.environ["TG_SESSION_STRING"]
 TG_GROUP_ID = os.environ["TG_GROUP_ID"]  # username (@grup) atau numeric ID grup
+if re.fullmatch(r"-?\d+", TG_GROUP_ID):
+    TG_GROUP_ID = int(TG_GROUP_ID)  # numeric ID lebih reliable di-resolve Telethon sebagai int, bukan string
 TG_TOPIC_ID = os.environ.get("TG_TOPIC_ID")  # opsional: ID topic (forum topics) tempat Zeta AI kirim sinyal
 TG_TOPIC_ID = int(TG_TOPIC_ID) if TG_TOPIC_ID else None
 
@@ -482,6 +484,12 @@ def main():
     log.info(f"Mulai dari msg_id > {last_id}")
 
     with TelegramClient(StringSession(TG_SESSION_STRING), TG_API_ID, TG_API_HASH) as client:
+        # PENTING: StringSession gak nyimpen cache entity (ID<->access_hash) dari sesi
+        # sebelumnya. Kalau TG_GROUP_ID numeric ID mentah langsung dipanggil tanpa ini,
+        # Telethon bakal gagal "Cannot find any entity corresponding to ...". Panggil
+        # get_dialogs() dulu supaya entity grup ke-cache buat run ini.
+        client.get_dialogs()
+
         iter_kwargs = dict(min_id=last_id, reverse=True)
         if TG_TOPIC_ID is not None:
             # Filter cuma pesan di dalam topic tertentu (forum topics) — kalau gak di-set,
