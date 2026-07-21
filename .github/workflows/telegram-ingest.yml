@@ -1,0 +1,41 @@
+name: telegram-ingest
+
+on:
+  schedule:
+    # === Sesi PAGI (06:00-10:45 WITA = 22:00-02:45 UTC) ===
+    # Bagian 1: 22:00-23:55 UTC, hari SEBELUM hari bursa WITA
+    #   dow UTC: 0=Minggu..4=Kamis -> cover start hari bursa Senin-Jumat WITA
+    - cron: '0,15,30,45 22,23 * * 0-4'
+    # Bagian 2: 00:00-02:45 UTC, hari YANG SAMA dengan hari bursa WITA
+    - cron: '0,15,30,45 0,1,2 * * 1-5'
+
+    # === Sesi SIANG (13:00-17:15 WITA = 05:00-09:15 UTC) ===
+    - cron: '0,15,30,45 5,6,7,8 * * 1-5'
+    - cron: '0,15 9 * * 1-5'
+
+  workflow_dispatch: {}   # manual trigger, PAKAI INI DULU buat testing sebelum andelin schedule
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: telegram-ingest
+      cancel-in-progress: false   # cegah 2 run bentrok kalau ada yang lambat/flood-wait
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - run: pip install -r requirements.txt
+
+      - run: python ingest.py
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          TG_SESSION_STRING: ${{ secrets.TG_SESSION_STRING }}
+          TG_GROUP_ID: ${{ secrets.TG_GROUP_ID }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_USER_ID: ${{ secrets.SUPABASE_USER_ID }}
