@@ -1,0 +1,37 @@
+name: zeta-journal-sync
+
+on:
+  schedule:
+    # Zeta AI ngaku sistem audit-nya jalan 3x sehari: 22:00, 01:00, 08:00 WIB.
+    # Itu kemungkinan besar pas status SL HIT / EXPIRED di-update di sisi mereka.
+    # Kita fetch +15 menit sesudahnya (buffer, jaga-jaga proses mereka belum
+    # instan selesai). Konversi ke UTC (WIB = UTC+7):
+    #   22:00 WIB -> 15:00 UTC (hari yang sama)      -> jalan jam 15:15 UTC
+    #   01:00 WIB -> 18:00 UTC (hari SEBELUMNYA)      -> jalan jam 18:15 UTC
+    #   08:00 WIB -> 01:00 UTC (hari yang sama)       -> jalan jam 01:15 UTC
+    - cron: '15 15 * * *'
+    - cron: '15 18 * * *'
+    - cron: '15 1 * * *'
+
+  workflow_dispatch: {}   # manual trigger buat testing
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: zeta-journal-sync
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - run: pip install -r requirements.txt
+
+      - run: python sync_journal.py
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_USER_ID: ${{ secrets.SUPABASE_USER_ID }}

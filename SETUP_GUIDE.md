@@ -21,6 +21,43 @@ tabel trade journal — karena app-nya baru dipatch supaya menghitung ulang
 ini app cuma trust data `trades[]` yang tersimpan apa adanya, yang gak pernah
 diupdate otomatis sama automasi).
 
+## Automasi ke-2: Zeta Journal Sync (gantiin scrape XLSX manual)
+
+Selain automasi Telegram (`ingest.py`), ada 1 automasi lagi: **`sync_journal.py`**
+— gantiin proses manual "scrape dashboard pakai Instant Data Scraper → export
+XLSX → upload ke IDXSY Signal". Ini yang ngisi status **SL HIT** & **EXPIRED**
+(yang emang gak pernah dipost di Telegram).
+
+**Jauh lebih simpel dari yang dikira** — ternyata dashboard `idx-journal.zeta-ai.pro`
+punya endpoint JSON publik statis (`/api/idx-signals.json`, ditemukan lewat
+DevTools Network tab), jadi **gak perlu Playwright/headless browser sama
+sekali**, cukup HTTP request biasa.
+
+**Gak butuh secret baru** — script ini reuse `SUPABASE_URL`,
+`SUPABASE_SERVICE_KEY`, `SUPABASE_USER_ID` yang sudah kamu isi sebelumnya
+buat automasi Telegram. Gak ada login/credential Zeta yang perlu disimpan
+(dashboard-nya publik).
+
+**Cara kerja**: fetch `completed[]` dari JSON API itu, convert ke format yang
+sama persis dengan yang diharapkan `mergeWithXlsxData()` di `idx_signal.html`,
+lalu **replace total** `trades_data.payload.lastXlsxRows` (bukan
+append/dedupe — sama seperti upload XLSX manual, yang juga selalu replace
+total tiap upload). **Gak perlu update `idx_signal.html` lagi** — patch yang
+sudah ada (v1.5) otomatis re-merge pakai `lastXlsxRows` apa pun isinya,
+setiap kali app di-load dari cloud.
+
+Jadwalnya disesuaikan sama waktu Zeta AI ngaku sistem audit mereka jalan
+(22:00, 01:00, 08:00 WIB) — asumsinya itu pas status SL HIT/EXPIRED di-update
+di sisi mereka, jadi kita fetch beberapa menit sesudahnya.
+
+File tambahan yang perlu di-drop ke repo (folder sama, `.github/workflows/`
+buat yang `.yml`):
+- `sync_journal.py`
+- `.github/workflows/zeta-journal-sync.yml`
+
+Testing-nya sama: **Actions → zeta-journal-sync → Run workflow** (manual),
+cek hasilnya di Supabase, baru biarin jadwal otomatis jalan.
+
 ## File yang sudah disiapkan
 
 | File | Isi |
