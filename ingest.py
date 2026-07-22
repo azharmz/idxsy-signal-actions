@@ -32,7 +32,7 @@ import sys
 import logging
 from datetime import datetime, timezone, timedelta
 
-from telethon import TelegramClient
+from telethon.sync import TelegramClient
 from telethon.sessions import StringSession
 from supabase import create_client, Client
 
