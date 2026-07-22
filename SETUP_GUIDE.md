@@ -1,15 +1,31 @@
 # Panduan Setup — Telegram Ingestion Automation (TG-ING-01)
 
+**Tujuan automasi ini: MENGGANTIKAN upload JSON manual ke IDXSY Signal.**
+Data yang ditarik dari grup Telegram langsung masuk ke `trades_data.payload`
+(struktur yang sama persis dibaca `idx_signal.html`) — begitu app dibuka di
+browser, sinyal/konfirmasi baru otomatis muncul, gak perlu export+upload JSON
+manual lagi.
+
 Semua kode sudah saya siapkan & sudah dites syntax-nya. Bagian yang tersisa
 di bawah ini **harus dikerjain manual oleh kamu sendiri** — gak bisa
 diwakilkan ke AI manapun (saya atau agen lain), karena butuh akses langsung
 ke akun Telegram & GitHub kamu.
 
+## ⚠️ Ada 1 file TAMBAHAN yang harus kamu deploy juga
+
+Selain repo automasi ini, **`idx_signal.html` juga perlu diupdate** (sudah
+saya patch versi terbarunya, v1.5) dan di-upload ulang ke Cloudflare Pages
+kamu. Tanpa update ini, sinyal baru dari automasi TETAP gak akan muncul di
+tabel trade journal — karena app-nya baru dipatch supaya menghitung ulang
+`trades[]` dari `signals[]`/`results[]` setiap kali load dari cloud (sebelum
+ini app cuma trust data `trades[]` yang tersimpan apa adanya, yang gak pernah
+diupdate otomatis sama automasi).
+
 ## File yang sudah disiapkan
 
 | File | Isi |
 |---|---|
-| `ingest.py` | Script utama — login Telegram, fetch pesan baru, parsing (di-port 1:1 dari `idx_signal.html`), insert ke Supabase |
+| `ingest.py` | Script utama — login Telegram, fetch pesan baru, parsing (di-port 1:1 dari `idx_signal.html`), APPEND ke `trades_data.payload` (bukan tabel terpisah) |
 | `requirements.txt` | Dependency Python (`telethon`, `supabase`) |
 | `telegram-ingest.yml` | GitHub Actions workflow (jadwal cron + concurrency guard) |
 | `generate_session.py` | Script sekali-pakai buat generate session string Telegram |
@@ -89,24 +105,31 @@ grup seperti biasa).
    - Gak ada error auth Telegram
    - Muncul log `"Selesai: X signal, Y result, Z regime, ..."`
    - Gak ada `"Pesan yang gagal di-parse"` (kalau ada, itu perlu dicek — kemungkinan format pesan baru yang belum ke-cover parser)
-4. Cek ke Supabase (kabari saya, saya bisa bantu verifikasi langsung) — pastikan baris baru masuk ke `signals`/`confirmations`/`market_regime` dengan `msg_id` yang valid, gak ada duplikat.
-5. Ulangi `Run workflow` manual 2-3 kali berturut-turut — pastikan gak numpuk duplikat (ini persis testing yang kita rencanain sebelumnya).
-6. Kalau semua aman, baru biarin jadwal `schedule` (cron) jalan otomatis.
+4. Cek ke Supabase (kabari saya, saya bisa bantu verifikasi langsung) — pastikan `trades_data.payload.signals[]`/`.results[]`/`.regimes[]` nambah entry baru dengan `msg_id` yang valid, gak ada duplikat.
+5. **Buka `idx_signal.html` di browser** (yang sudah di-deploy versi v1.5) — pastikan sinyal barunya kelihatan di tabel trade journal TANPA perlu upload JSON manual.
+6. Ulangi `Run workflow` manual 2-3 kali berturut-turut — pastikan gak numpuk duplikat.
+7. Kalau semua aman, baru biarin jadwal `schedule` (cron) jalan otomatis.
+
+**Catatan cursor**: saya sudah reset `ingest_cursor` ke `7202` (titik terakhir yang sudah ke-cover data manual JSON kamu), jadi run pertama abis ini bakal cepat — cuma narik pesan yang bener-bener baru sejak upload manual terakhir, bukan re-backfill semua histori. Kamu gak perlu isi `backfill_days` lagi kecuali mau testing ulang secara sengaja.
 
 ## Catatan soal backfill (run pertama)
 
-Karena `ingest_cursor` mulai dari `0`, run pertama bakal narik **SEMUA histori
-grup dari awal** (bukan cuma pesan baru). Ini **aman**, bukan masalah —
-karena insert-nya pakai `msg_id` **asli** Telegram sebagai key upsert,
-jadi kalau pesan itu kebetulan sudah pernah masuk ke `signals`/`confirmations`
-lewat cara lain (JSON export manual), run ini cuma **update** baris yang sama
-(idempotent), bukan bikin duplikat baru.
+Karena `ingest_cursor` sekarang sudah di-reset ke `7202` (bukan `0`), run
+pertama **gak bakal** full-backfill semua histori — cuma narik pesan baru
+sejak titik itu. Kalau suatu saat kamu perlu full re-backfill (misal ganti
+akun/pindah grup), tetap aman dilakukan — insert-nya pakai `msg_id` **asli**
+Telegram sebagai key dedupe (`dedupeByMsgId`), jadi pesan yang sudah ada di
+`trades_data.payload` gak bakal dobel, cuma di-overwrite/update di tempat
+yang sama (idempotent).
 
-Yang perlu diantisipasi cuma soal **durasi run pertama** — narik 900+ pesan
-lama makanya bisa makan waktu lebih lama dari run rutin (yang cuma beberapa
-pesan baru). GitHub Actions kasih waktu sampai 6 jam per run, jadi ini masih
-jauh dari limit — gak perlu tindakan khusus, cukup sabar nunggu run pertama
-kelar (mungkin beberapa menit), baru pantau hasilnya.
+## Soal data dari testing sebelumnya (tabel `signals`/`confirmations`)
+
+Run testing kita sebelumnya (pas arsitektur masih salah sasaran) sempat
+nulis 16 signal + 25 confirmation + 2 market_regime ke tabel ternormalisasi
+(`signals`/`confirmations`/`market_regime` — punya IDXSY Screener). Data itu
+**valid dan benar** (sudah kita verifikasi kualitasnya), jadi **gak perlu
+dihapus** — anggap aja itu bonus data buat IDXSY Screener, gak mengganggu
+apa pun di alur `trades_data` yang baru ini.
 
 ## Kalau ada error
 

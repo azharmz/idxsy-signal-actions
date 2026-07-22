@@ -1,37 +1,38 @@
 #!/usr/bin/env python3
 """
-IDXSY Telegram Group Ingestion (TG-ING-01)
-===========================================
-Scheduled polling job (dijalankan via GitHub Actions cron) yang narik pesan
-baru dari grup Telegram Zeta AI, parsing pakai logic yang di-port 1:1 dari
-`idx_signal.html` (parseSignal / parseResult / parseRegime), lalu insert ke
-Supabase (tabel signals / confirmations / market_regime).
+IDXSY Telegram Group Ingestion (TG-ING-01) — v2
+=================================================
+Scheduled polling job yang narik pesan baru dari grup Telegram Zeta AI,
+parsing pakai logic yang di-port 1:1 dari `idx_signal.html`, lalu APPEND ke
+`trades_data.payload.signals[]` / `.results[]` / `.regimes[]` / `.others[]`
+— TUJUANNYA MENGGANTIKAN UPLOAD JSON MANUAL sepenuhnya.
 
-Kenapa Python + Telethon (bukan Deno/TypeScript):
-  Telethon adalah library MTProto paling matang yang tersedia, sudah
-  terbukti jalan terhadap 948 pesan real project ini. Alternatif Deno-native
-  (MTKruto dkk) masih pre-1.0 dan secara eksplisit belum direkomendasikan
-  untuk production oleh maintainer-nya sendiri — risiko terlalu besar untuk
-  pipeline data trading real.
+PENTING soal arsitektur:
+  Script ini SENGAJA TIDAK menghitung ulang `payload.trades[]` (hasil
+  matching sinyal<->konfirmasi + merge status XLSX). Logic itu (matchTrades,
+  mergeWithXlsxData, preserveXlsxMergeAcrossJsonUpdate) TETAP tinggal di
+  idx_signal.html (JS, client-side) sebagai SATU-SATUNYA sumber kebenaran —
+  supaya gak ada 2 implementasi (Python vs JS) yang bisa diam-diam divergen.
+  idx_signal.html sudah dipatch (checkAndSyncFromCloud) supaya recompute
+  trades[] setiap kali load dari cloud, bukan trust `p.trades` mentah-mentah.
+  Jadi begitu app dibuka di browser, sinyal/konfirmasi baru dari automasi ini
+  otomatis ke-render, TANPA perlu upload JSON manual lagi.
 
 State: `last_processed_msg_id` disimpan di tabel Supabase `ingest_cursor`
 (BUKAN di file/repo) — stateless, aman kalau job pindah runner.
 
-Anti-duplicate: pakai msg_id ASLI dari Telegram (message.id) langsung sebagai
-primary matching key ke constraint unique (msg_id, user_id) yang sudah ada di
-tabel `signals` dan `confirmations`. TIDAK perlu synthetic hash sama sekali
-di jalur ini — synthetic ID cuma dibutuhkan dulu untuk data lama yang asalnya
-dari XLSX (yang emang gak punya msg_id Telegram).
+Dedup: pakai `msg_id` asli Telegram, semantiknya identik dengan
+`dedupeByMsgId()` di idx_signal.html (map keyed by msg_id, item baru
+menang/overwrite kalau ada duplikat).
 """
 
 import os
 import re
 import sys
-import time
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
-from telethon.sync import TelegramClient
+from telethon import TelegramClient
 from telethon.sessions import StringSession
 from supabase import create_client, Client
 
@@ -47,6 +48,7 @@ log = logging.getLogger("tg-ingest")
 TG_API_ID = int(os.environ["TG_API_ID"])
 TG_API_HASH = os.environ["TG_API_HASH"]
 TG_SESSION_STRING = os.environ["TG_SESSION_STRING"]
+
 TG_GROUP_ID = os.environ["TG_GROUP_ID"]  # username (@grup) atau numeric ID grup
 if re.fullmatch(r"-?\d+", TG_GROUP_ID):
     TG_GROUP_ID = int(TG_GROUP_ID)  # numeric ID lebih reliable di-resolve Telethon sebagai int, bukan string
@@ -57,15 +59,12 @@ TG_TOPIC_ID = int(TG_TOPIC_ID) if TG_TOPIC_ID else None
 # dari N hari terakhir (pakai filter tanggal langsung ke Telegram), bukan dari cursor
 # tersimpan. Cursor tetap ke-update normal di akhir run, jadi run BERIKUTNYA (tanpa
 # env var ini) otomatis lanjut incremental dari situ -- gak perlu reset manual lagi.
-# JANGAN di-set permanen di production; ini cuma buat mempercepat/verifikasi 1x run.
 BACKFILL_SINCE_DAYS = os.environ.get("BACKFILL_SINCE_DAYS")
 BACKFILL_SINCE_DAYS = int(BACKFILL_SINCE_DAYS) if BACKFILL_SINCE_DAYS else None
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
-SUPABASE_USER_ID = os.environ["SUPABASE_USER_ID"]  # user_id (uuid) pemilik data di semua tabel
-
-ENTRY_MATCH_TOLERANCE_PCT = 0.05  # sama persis dengan konstanta di idx_signal.html
+SUPABASE_USER_ID = os.environ["SUPABASE_USER_ID"]  # user_id (uuid) pemilik data di trades_data
 
 sb: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
@@ -124,13 +123,16 @@ def classify(text):
 
 
 # ---------------------------------------------------------------------------
-# parse_signal — port 1:1 dari parseSignal() JS
+# parse_signal — port 1:1 dari parseSignal() JS. Output dict ini SENGAJA
+# pakai nama key yang PERSIS SAMA dengan object `row` di JS, karena ini
+# langsung di-append ke payload.signals[] apa adanya (harus bentuknya identik
+# dengan yang dikonsumsi matchTrades()/renderAll() di idx_signal.html).
 # ---------------------------------------------------------------------------
 def parse_signal(text, msg_id, date):
     row = {"msg_id": msg_id, "date": date, "type": "SIGNAL"}
     lines = text.split("\n")
 
-    row["market_warning"] = match1(r"⚠️\s*(.+)", text)
+    row["market_warning"] = match1(r"^⚠️\s*(.+)$", text, flags=re.MULTILINE)
     row["symbol"] = match1(r"Saham:\s*(\S+)", text)
 
     sig_m = re.search(r"Signal:\s*.*?\b(BUY|WATCHLIST|SELL)\b", text)
@@ -308,7 +310,6 @@ def parse_result(text, msg_id, date):
         row["day_high"] = parse_num(match1(r"Day High:\s*(Rp?[\d.,]+)", text))
         row["profit_pct"] = match1(r"Profit Sekarang:\s*([+\-\d.]+%)", text)
 
-    # Durasi eksplisit di pesan konfirmasi (best-guess pattern, sama seperti JS)
     dur_m = re.search(r"Durasi(?:\s*Sinyal)?:\s*([\d.]+)\s*(hari|jam)", text, re.IGNORECASE)
     if dur_m:
         dur_val = float(dur_m.group(1))
@@ -340,124 +341,18 @@ def parse_regime(text, msg_id, date):
 
 
 # ---------------------------------------------------------------------------
-# Mapping row hasil parse -> kolom tabel Supabase
+# dedupe_by_msg_id — port 1:1 dari dedupeByMsgId() JS. Item BARU menang
+# (overwrite) kalau ada msg_id yang sama dengan yang lama.
 # ---------------------------------------------------------------------------
-def signal_to_db_row(sig):
-    detail_keys = [
-        "market_warning", "confidence_reasons", "chart_pattern", "candle_pattern",
-        "bandar_signal", "smart_money_net", "top_buyer_1", "top_buyer_2", "top_buyer_3",
-        "top_seller_1", "top_seller_2", "top_seller_3", "macd", "macd_signal_val",
-        "macd_trend", "rsi", "rsi_label", "ema20", "ema50", "ema_trend", "vwap",
-        "vwap_position", "bb_lower", "bb_upper", "adx", "adx_label", "atr",
-        "foreign_status", "net_asing", "net_asing_lot", "foreign_buy_lot",
-        "foreign_sell_lot", "partisipasi_asing_pct", "beta", "beta_label",
-        "volatilitas_pct", "analyst_opinion", "news_1", "news_2", "news_3",
-        "news_4", "news_5", "target2_price", "sl_moderat", "sl_konservatif",
-        "bot_version",
-    ]
-    detail = {k: sig[k] for k in detail_keys if k in sig}
-    return {
-        "msg_id": sig["msg_id"],
-        "ticker": sig.get("symbol"),
-        "signal_type": sig.get("signal_type"),
-        "signal_timestamp": sig["date"],
-        "entry_price": sig.get("entry_price"),
-        "tp1_price": sig.get("take_profit"),
-        "tp1_pct": sig.get("take_profit_pct"),
-        "tp2_price": sig.get("target2_price"),
-        "sl_default_price": sig.get("stop_loss"),
-        "sl_default_pct": sig.get("stop_loss_pct"),
-        "sl_moderat_price": sig.get("sl_moderat"),
-        "sl_konservatif_price": sig.get("sl_konservatif"),
-        "confidence_score": sig.get("confidence_score"),
-        "confidence_label": sig.get("confidence_label"),
-        "detail": detail,
-        "raw_text": sig.get("raw_text"),
-    }
-
-
-def result_to_confirmation_row(res, signal_id):
-    confirmation_type_map = {
-        "TP_HIT": "tp_hit",
-        "PROFIT_LOCKED": "closed",
-        "PROFIT_RUNNING": "ongoing",
-    }
-    return {
-        "msg_id": res["msg_id"],
-        "signal_id": signal_id,
-        "ticker": res.get("symbol"),
-        "confirmation_type": confirmation_type_map.get(res.get("type")),
-        "status": res.get("status_text"),
-        "entry_price": res.get("entry"),
-        "exit_price": res.get("exit_price"),
-        "profit_pct": res.get("profit_pct"),
-        "peak_price": res.get("peak_price"),
-        "peak_pct": res.get("peak_pct"),
-        "durasi": str(res["duration_days_confirm"]) if "duration_days_confirm" in res else None,
-        "raw_text": res.get("raw_text"),
-    }
-
-
-def regime_to_db_row(reg):
-    return {
-        "date": reg["date"][:10],  # ambil bagian tanggal (YYYY-MM-DD) dari ISO timestamp
-        "prediction": reg.get("prediction"),
-        "score": reg.get("score"),
-        "summary": reg.get("commentary"),
-        "raw_text": reg.get("raw_text"),
-        # `index_scoring` / `wall_street` / `komoditas` / `suspended` / `uma` / `strength_emoji`
-        # belum ada regex parser-nya di idx_signal.html (regime message punya bagian lain yang
-        # belum di-cover) — dibiarkan NULL, JANGAN ditebak isinya.
-    }
+def dedupe_by_msg_id(existing, new):
+    merged = {item["msg_id"]: item for item in existing}
+    merged.update({item["msg_id"]: item for item in new})
+    return list(merged.values())
 
 
 # ---------------------------------------------------------------------------
-# Matching confirmation -> signal (simplified live version dari matchTrades() JS)
-# ---------------------------------------------------------------------------
-def find_matching_signal_id(res):
-    """Cari signal_id yang cocok buat sebuah result/confirmation, berdasarkan
-    ticker + entry_price (toleransi ENTRY_MATCH_TOLERANCE_PCT), sama seperti
-    matchTrades() di idx_signal.html. Ambil kandidat dengan signal_timestamp
-    PALING BARU yang <= waktu confirmation (confirmation harus datang SETELAH
-    sinyalnya)."""
-    ticker = res.get("symbol")
-    entry = res.get("entry")
-    if not ticker or entry is None:
-        return None
-
-    lo = entry * (1 - ENTRY_MATCH_TOLERANCE_PCT / 100)
-    hi = entry * (1 + ENTRY_MATCH_TOLERANCE_PCT / 100)
-
-    resp = (
-        sb.table("signals")
-        .select("id, signal_timestamp, entry_price")
-        .eq("user_id", SUPABASE_USER_ID)
-        .eq("ticker", ticker)
-        .gte("entry_price", lo)
-        .lte("entry_price", hi)
-        .lte("signal_timestamp", res["date"])
-        .order("signal_timestamp", desc=True)
-        .limit(1)
-        .execute()
-    )
-    rows = resp.data or []
-    return rows[0]["id"] if rows else None
-
-
-def is_halal(ticker):
-    resp = (
-        sb.table("issi_list")
-        .select("ticker")
-        .eq("user_id", SUPABASE_USER_ID)
-        .eq("ticker", ticker)
-        .limit(1)
-        .execute()
-    )
-    return bool(resp.data)
-
-
-# ---------------------------------------------------------------------------
-# Cursor (state) helpers
+# Cursor (state) helpers — cuma soal progress baca Telegram, gak ada
+# hubungannya sama sekali dengan skema trades_data.
 # ---------------------------------------------------------------------------
 def get_last_processed_id():
     resp = (
@@ -485,11 +380,54 @@ def set_last_processed_id(msg_id):
 
 
 # ---------------------------------------------------------------------------
+# trades_data helpers
+# ---------------------------------------------------------------------------
+def load_current_payload():
+    resp = (
+        sb.table("trades_data")
+        .select("payload")
+        .eq("user_id", SUPABASE_USER_ID)
+        .limit(1)
+        .execute()
+    )
+    rows = resp.data or []
+    if rows and rows[0].get("payload"):
+        p = rows[0]["payload"]
+    else:
+        p = {}
+    # Default aman kalau row/field belum ada sama sekali (user baru, belum pernah
+    # upload JSON manual sekalipun) — biar automasi ini bisa jadi cara PERTAMA data masuk.
+    p.setdefault("signals", [])
+    p.setdefault("results", [])
+    p.setdefault("regimes", [])
+    p.setdefault("others", [])
+    p.setdefault("trades", [])          # SENGAJA gak disentuh di sini, lihat catatan modul.
+    p.setdefault("filename", "telegram-auto-ingest")
+    p.setdefault("lastXlsxRows", [])
+    return p
+
+
+def save_payload(payload):
+    sb.table("trades_data").upsert(
+        {
+            "user_id": SUPABASE_USER_ID,
+            "payload": payload,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        },
+        on_conflict="user_id",
+    ).execute()
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
     last_id = get_last_processed_id()
     log.info(f"Mulai dari msg_id > {last_id}")
+
+    new_signals, new_results, new_regimes, new_others = [], [], [], []
+    failed_msg_ids = []
+    max_id_seen = last_id
 
     with TelegramClient(StringSession(TG_SESSION_STRING), TG_API_ID, TG_API_HASH) as client:
         # PENTING: StringSession gak nyimpen cache entity (ID<->access_hash) dari sesi
@@ -500,16 +438,12 @@ def main():
 
         iter_kwargs = dict(reverse=True)
         if BACKFILL_SINCE_DAYS is not None:
-            from datetime import timedelta
             cutoff = datetime.now(timezone.utc) - timedelta(days=BACKFILL_SINCE_DAYS)
             iter_kwargs["offset_date"] = cutoff
             log.info(f"Mode testing: cuma narik pesan sejak {cutoff.isoformat()} ({BACKFILL_SINCE_DAYS} hari terakhir)")
         else:
             iter_kwargs["min_id"] = last_id
         if TG_TOPIC_ID is not None:
-            # Filter cuma pesan di dalam topic tertentu (forum topics) — kalau gak di-set,
-            # ambil dari SELURUH grup (termasuk topic lain / general), yang keliru kalau
-            # grupnya emang pakai topics dan sinyal cuma ada di 1 topic spesifik.
             iter_kwargs["reply_to"] = TG_TOPIC_ID
         messages = list(client.iter_messages(TG_GROUP_ID, **iter_kwargs))
 
@@ -517,17 +451,11 @@ def main():
     if not messages:
         return
 
-    max_id_seen = last_id
-    n_signal = n_result = n_regime = n_other = 0
-    failed_msg_ids = []
-
     for m in messages:
         # PENTING: pakai raw_text, BUKAN m.text. Telethon `.text` merender ulang pesan
         # sebagai Markdown (bold jadi **Symbol**, dst) sesuai entity formatting yang
         # dipakai bot. Semua regex parser di sini didesain buat teks POLOS (persis
         # seperti JSON export Telegram Desktop, yang gak nyisipin tanda ** literal).
-        # Salah pakai `.text` bikin semua field gagal ke-extract (Symbol: dst gak
-        # ketemu karena teks aslinya "**Symbol**:", bukan "Symbol:").
         raw = m.raw_text
         if not raw:
             max_id_seen = max(max_id_seen, m.id)
@@ -537,65 +465,51 @@ def main():
 
         try:
             cat = classify(text)
-
             if cat == "signal":
-                sig = parse_signal(text, m.id, date_iso)
-                db_row = signal_to_db_row(sig)
-                db_row["user_id"] = SUPABASE_USER_ID
-                if db_row.get("ticker"):
-                    db_row["is_halal"] = is_halal(db_row["ticker"])
-                sb.table("signals").upsert(db_row, on_conflict="msg_id,user_id").execute()
-                n_signal += 1
-
+                new_signals.append(parse_signal(text, m.id, date_iso))
             elif cat == "result":
-                res = parse_result(text, m.id, date_iso)
-                signal_id = find_matching_signal_id(res)
-                conf_row = result_to_confirmation_row(res, signal_id)
-                conf_row["user_id"] = SUPABASE_USER_ID
-                sb.table("confirmations").upsert(conf_row, on_conflict="msg_id,user_id").execute()
-                n_result += 1
-                if signal_id is None:
-                    log.warning(f"msg #{m.id}: confirmation {res.get('symbol')} gak ketemu signal pasangannya")
-
+                new_results.append(parse_result(text, m.id, date_iso))
             elif cat == "regime":
-                reg = parse_regime(text, m.id, date_iso)
-                if reg.get("regime_date"):
-                    reg_row = regime_to_db_row(reg)
-                    reg_row["user_id"] = SUPABASE_USER_ID
-                    sb.table("market_regime").upsert(reg_row, on_conflict="date,user_id").execute()
-                    n_regime += 1
-                else:
-                    log.warning(f"msg #{m.id}: regime message tanpa tanggal jelas, di-skip")
-
+                new_regimes.append(parse_regime(text, m.id, date_iso))
             else:
-                n_other += 1  # gak diinsert kemana pun, cuma dihitung buat logging
-
-            # Cursor maju SETIAP pesan berhasil diproses (bukan cuma di akhir batch),
-            # supaya kalau job crash di tengah jalan, reprocessing minimal.
+                new_others.append({"msg_id": m.id, "date": date_iso, "type": "OTHER", "raw_text": text})
             max_id_seen = max(max_id_seen, m.id)
-            set_last_processed_id(max_id_seen)
-
         except Exception as e:
-            # PENTING: jangan `break`/stop total di sini. Satu pesan format aneh/gak
-            # terduga TIDAK BOLEH nge-block semua sinyal baru selanjutnya selamanya
-            # (poison message problem). Skip pesan ini, catat buat dicek manual, tetap
-            # majukan cursor biar pipeline jalan terus.
+            # Poison-message safety: 1 pesan format aneh TIDAK BOLEH nge-block semua
+            # sinyal baru selanjutnya selamanya. Skip, catat buat dicek manual, tetap lanjut.
             failed_msg_ids.append(m.id)
             log.error(f"Gagal proses msg #{m.id}, DI-SKIP (bukan diblokir): {e}")
             max_id_seen = max(max_id_seen, m.id)
-            set_last_processed_id(max_id_seen)
+
+    # Merge SATU KALI ke payload trades_data (bukan per-pesan) — payload ini adalah
+    # blob gemuk (seluruh state app), jadi baca-ubah-simpan per pesan bakal boros +
+    # lambat. dedupe_by_msg_id() semantiknya identik dengan dedupeByMsgId() di JS.
+    payload = load_current_payload()
+    payload["signals"] = dedupe_by_msg_id(payload["signals"], new_signals)
+    payload["results"] = dedupe_by_msg_id(payload["results"], new_results)
+    payload["regimes"] = dedupe_by_msg_id(payload["regimes"], new_regimes)
+    payload["others"] = dedupe_by_msg_id(payload["others"], new_others)
+    # payload["trades"] SENGAJA TIDAK diubah di sini — idx_signal.html yang recompute
+    # dari signals[]/results[] setiap kali load dari cloud (lihat catatan di modul docstring).
+    save_payload(payload)
+
+    # Cursor cuma dimajukan SETELAH payload berhasil tersimpan -- kalau save_payload()
+    # gagal (network/permission/dll), cursor TETAP di posisi lama, jadi run berikutnya
+    # otomatis retry batch yang sama (aman/idempotent karena dedupe by msg_id).
+    set_last_processed_id(max_id_seen)
 
     log.info(
-        f"Selesai: {n_signal} signal, {n_result} result, {n_regime} regime, "
-        f"{n_other} other (skip kategori), {len(failed_msg_ids)} gagal parse"
+        f"Selesai: {len(new_signals)} signal, {len(new_results)} result, "
+        f"{len(new_regimes)} regime, {len(new_others)} other (skip kategori), "
+        f"{len(failed_msg_ids)} gagal parse. Total di payload sekarang: "
+        f"{len(payload['signals'])} signal, {len(payload['results'])} result."
     )
     if failed_msg_ids:
         log.error(
             f"Pesan yang gagal di-parse (PERLU DICEK MANUAL, kemungkinan format baru "
             f"dari bot yang belum ke-cover parser): {failed_msg_ids}"
         )
-        sys.exit(1)  # exit non-zero supaya GitHub Actions run kelihatan "failed" di UI,
-                      # walau datanya sendiri tetap masuk (skip cuma yang error doang)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
