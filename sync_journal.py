@@ -41,7 +41,7 @@ mana pun, setiap kali app di-load dari cloud.
 import os
 import sys
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import requests
 from supabase import create_client, Client
@@ -66,6 +66,24 @@ STATUS_MAP = {
     "SL_HIT": "SL HIT",
     "EXPIRED": "EXPIRED",
 }
+
+
+def wib_string_to_wita_date(date_str):
+    """Convert timestamp mentah dari API Zeta (WIB -- terverifikasi lewat cross-check
+    PACK msg_id 6954: member API bilang 12:27, verified true UTC+7/WIB = 12:29, MATCH;
+    kalau WITA harusnya 13:29) ke tanggal WITA (+1 jam), biar konsisten sama konvensi
+    yang dipakai trades_data.payload.signals[]/results[] (WITA, dari upload manual
+    browser user sendiri). PENTING: cuma date-part yang dipakai di xlsxRow, tapi tetap
+    harus dikonversi dulu SEBELUM diambil tanggalnya, biar gak salah hari buat sinyal
+    yang deket tengah malam."""
+    if not date_str:
+        return None
+    try:
+        naive = datetime.strptime(date_str[:19], "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return date_str[:10] if len(date_str) >= 10 else None
+    wita = naive + timedelta(hours=1)
+    return wita.strftime("%Y-%m-%d")
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
@@ -114,7 +132,7 @@ def to_xlsx_row_member(entry, uid):
     return_pct = f"{profit_pct:+.1f}%" if profit_pct is not None else None
 
     date_raw = entry.get("timestamp") or ""
-    date_only = date_raw[:10] if date_raw else None
+    date_only = wib_string_to_wita_date(date_raw)
 
     return {
         "_uid": uid,
@@ -140,7 +158,7 @@ def to_xlsx_row_public(entry, uid):
     return_pct = f"{profit_pct:+.1f}%" if profit_pct is not None else None
 
     date_raw = entry.get("date") or ""
-    date_only = date_raw[:10] if date_raw else None
+    date_only = wib_string_to_wita_date(date_raw)
 
     return {
         "_uid": uid,

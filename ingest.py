@@ -31,6 +31,7 @@ import re
 import sys
 import logging
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 
 from telethon.sync import TelegramClient
 from telethon.sessions import StringSession
@@ -461,7 +462,16 @@ def main():
             max_id_seen = max(max_id_seen, m.id)
             continue
         text = raw
-        date_iso = m.date.astimezone(timezone.utc).isoformat()
+        # PENTING: simpan sebagai string WITA NAIVE (tanpa offset sama sekali), PERSIS
+        # format yang dipakai 654 dari 731 entry lama (hasil upload JSON manual, browser
+        # user sendiri yang WITA) -- BUKAN WIB, BUKAN UTC. idx_signal.html matching
+        # (keyOf, mergeWithXlsxData, dll) semua pakai String(date).slice(0,10) MENTAH,
+        # gak ada konversi timezone -- jadi kalau disimpan beda zona dari yang sudah
+        # ada, sinyal yang deket tengah malam bisa ke-slice jadi tanggal beda ->
+        # gagal matching -> data duplikat. Instant absolutnya tetap presisi selama
+        # browser yang baca ini juga di WITA (asumsi valid, app ini single-user
+        # milik orang Makassar).
+        date_iso = m.date.astimezone(ZoneInfo("Asia/Makassar")).replace(tzinfo=None).isoformat()
 
         try:
             cat = classify(text)
