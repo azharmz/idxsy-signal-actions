@@ -2,17 +2,31 @@
 """
 IDXSY Zeta Journal Sync (replaces manual "scrape dashboard -> XLSX -> upload" step)
 ====================================================================================
-Fetch `https://idx-journal.zeta-ai.pro/api/idx-signals.json` (endpoint publik,
-statis, TANPA login — ditemukan lewat DevTools Network tab, bukan hasil
-scraping HTML) dan replace `trades_data.payload.lastXlsxRows` dengan data
-`completed[]` dari situ.
+Fetch data status final trade (TP HIT / SL HIT / EXPIRED) dari Zeta AI, lalu
+replace `trades_data.payload.lastXlsxRows` dengan itu.
+
+Dua sumber, PREFER yang member (lebih lengkap):
+
+1. MEMBER (https://member.zeta-ai.pro/api/signals) -- butuh cookie
+   `zeta_member=...` (secret ZETA_MEMBER_COOKIE). INI LEBIH LENGKAP --
+   ditemukan lewat perbandingan langsung: endpoint publik ternyata SUKA
+   nge-drop sebagian record (terutama SL_HIT, berhenti total sejak
+   2026-06-26 di versi publik, padahal di member ada terus). Contoh nyata:
+   PACK (SL_HIT, 2026-07-21) ada di member, TIDAK ADA di publik.
+
+2. PUBLIK (https://idx-journal.zeta-ai.pro/api/idx-signals.json) -- fallback
+   kalau ZETA_MEMBER_COOKIE belum di-set / gagal auth. TANPA login, tapi
+   datanya gak lengkap (lihat poin 1).
+
+PENTING soal cookie member: namanya mengandung bulan ("zetamemberjuly2026"),
+kemungkinan besar ROTATE tiap bulan. Kalau tiba-tiba gagal auth, cek dulu
+apakah cookie ini perlu di-update manual (buka member.zeta-ai.pro di browser,
+DevTools > Network > cari request /api/signals > copy value cookie
+`zeta_member` yang baru > update GitHub Secret ZETA_MEMBER_COOKIE).
 
 Kenapa ini yang punya status SL HIT/EXPIRED (bukan Telegram):
   Grup Telegram Zeta AI cuma post notifikasi kalau profit (TP HIT/PROFIT
-  LOCKED/PROFIT RUNNING) — SL HIT dan EXPIRED gak pernah dipost publik.
-  Dashboard/journal JSON ini punya status FINAL yang sebenarnya (otoritatif),
-  makanya ini pengganti proses manual "scrape dashboard pakai Instant Data
-  Scraper -> export XLSX -> upload manual ke IDXSY Signal".
+  LOCKED/PROFIT RUNNING) -- SL HIT dan EXPIRED gak pernah dipost publik.
 
 Kenapa REPLACE (bukan APPEND/dedupe kayak signals[]/results[]):
   Ini snapshot LENGKAP tiap kali di-fetch (bukan incremental), sama seperti
@@ -38,7 +52,10 @@ logging.basicConfig(
 )
 log = logging.getLogger("journal-sync")
 
-JOURNAL_API_URL = "https://idx-journal.zeta-ai.pro/api/idx-signals.json"
+MEMBER_API_URL = "https://member.zeta-ai.pro/api/signals"
+PUBLIC_API_URL = "https://idx-journal.zeta-ai.pro/api/idx-signals.json"
+
+ZETA_MEMBER_COOKIE = os.environ.get("ZETA_MEMBER_COOKIE")  # opsional, format: "zeta_member=xxxxx"
 
 # Konversi status dari format API (underscore) ke format yang dipakai
 # mergeWithXlsxData() di idx_signal.html (spasi) -- PENTING, kalau salah
@@ -57,24 +74,73 @@ SUPABASE_USER_ID = os.environ["SUPABASE_USER_ID"]
 sb: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 
-def fetch_journal():
-    resp = requests.get(JOURNAL_API_URL, timeout=30)
+def fetch_member_signals():
+    """Fetch dari member.zeta-ai.pro/api/signals -- lebih lengkap, butuh cookie."""
+    cookie_value = ZETA_MEMBER_COOKIE
+    if cookie_value and "=" not in cookie_value:
+        # Jaga-jaga kalau secret cuma isi value-nya doang (tanpa "zeta_member=" prefix)
+        cookie_value = f"zeta_member={cookie_value}"
+    resp = requests.get(
+        MEMBER_API_URL,
+        headers={"Cookie": cookie_value},
+        timeout=30,
+    )
+    if resp.status_code in (401, 403):
+        raise RuntimeError(
+            f"Auth gagal ({resp.status_code}) ke member API. Cookie ZETA_MEMBER_COOKIE "
+            f"kemungkinan sudah expired (namanya mengandung nama bulan -- kemungkinan "
+            f"rotate tiap bulan). Cek ulang value cookie terbaru lewat DevTools di "
+            f"member.zeta-ai.pro, lalu update GitHub Secret ZETA_MEMBER_COOKIE."
+        )
     resp.raise_for_status()
     return resp.json()
 
 
-def to_xlsx_row(entry, uid):
-    """Konversi 1 entry dari completed[] (API) ke bentuk row yang dikonsumsi
-    mergeWithXlsxData() di idx_signal.html: {_uid, date, symbol, decision,
-    entry, sl, tp, status, return_pct}."""
+def fetch_public_journal():
+    """Fetch dari idx-journal.zeta-ai.pro -- fallback, publik, TANPA login, tapi
+    datanya gak selengkap versi member (banyak record ke-drop, terutama SL_HIT)."""
+    resp = requests.get(PUBLIC_API_URL, timeout=30)
+    resp.raise_for_status()
+    return resp.json().get("completed", [])
+
+
+def to_xlsx_row_member(entry, uid):
+    """Konversi 1 entry dari member API ke bentuk row yang dikonsumsi
+    mergeWithXlsxData(): {_uid, date, symbol, decision, entry, sl, tp, status, return_pct}."""
     raw_status = (entry.get("status") or "").strip()
-    status = STATUS_MAP.get(raw_status, raw_status)  # fallback: pass-through kalau ada status baru yang belum ke-map
+    status = STATUS_MAP.get(raw_status, raw_status)
+
+    profit_pct = entry.get("profit_pct")
+    return_pct = f"{profit_pct:+.1f}%" if profit_pct is not None else None
+
+    date_raw = entry.get("timestamp") or ""
+    date_only = date_raw[:10] if date_raw else None
+
+    return {
+        "_uid": uid,
+        "date": date_only,
+        "symbol": (entry.get("symbol") or "").strip().upper(),
+        "decision": entry.get("decision"),
+        "entry": entry.get("close_price"),  # field ini isinya harga ENTRY, penamaan agak menyesatkan
+        "sl": entry.get("stop_loss"),
+        "tp": entry.get("take_profit"),
+        "status": status,
+        "return_pct": return_pct,
+    }
+
+
+def to_xlsx_row_public(entry, uid):
+    """Konversi 1 entry dari public API's completed[] (struktur field beda dikit
+    dari member API: 'date' bukan 'timestamp', 'entry'/'sl'/'tp' bukan
+    'close_price'/'stop_loss'/'take_profit')."""
+    raw_status = (entry.get("status") or "").strip()
+    status = STATUS_MAP.get(raw_status, raw_status)
 
     profit_pct = entry.get("profit_pct")
     return_pct = f"{profit_pct:+.1f}%" if profit_pct is not None else None
 
     date_raw = entry.get("date") or ""
-    date_only = date_raw[:10] if date_raw else None  # "2026-07-22 12:51:13" -> "2026-07-22"
+    date_only = date_raw[:10] if date_raw else None
 
     return {
         "_uid": uid,
@@ -121,27 +187,43 @@ def save_payload(payload):
 
 
 def main():
-    log.info(f"Fetch {JOURNAL_API_URL}")
-    data = fetch_journal()
-    completed = data.get("completed", [])
-    log.info(f"API updated_at: {data.get('updated')}, {len(completed)} baris 'completed'")
+    xlsx_rows = None
+    source_used = None
 
-    if not completed:
-        log.warning("Response API kosong (completed=[]) -- SKIP, gak replace lastXlsxRows "
-                    "dengan data kosong (jaga-jaga API lagi error/maintenance sesaat).")
+    if ZETA_MEMBER_COOKIE:
+        try:
+            log.info(f"Fetch {MEMBER_API_URL} (sumber utama, lebih lengkap)")
+            raw = fetch_member_signals()
+            # Endpoint ini isinya SEMUA sinyal (aktif + selesai) jadi 1 list -- filter
+            # cuma yang udah ada status final-nya (resolved), bukan yang masih open.
+            completed = [e for e in raw if e.get("status")]
+            xlsx_rows = [to_xlsx_row_member(e, i) for i, e in enumerate(completed)
+                         if e.get("symbol") and e.get("timestamp")]
+            source_used = "member"
+            log.info(f"Berhasil dari member API: {len(xlsx_rows)} baris resolved (dari {len(raw)} total)")
+        except Exception as e:
+            log.warning(f"Gagal fetch member API ({e}), fallback ke publik.")
+
+    if xlsx_rows is None:
+        log.info(f"Fetch {PUBLIC_API_URL} (fallback, TANPA login tapi kurang lengkap)")
+        completed = fetch_public_journal()
+        xlsx_rows = [to_xlsx_row_public(e, i) for i, e in enumerate(completed)
+                     if e.get("symbol") and e.get("date")]
+        source_used = "public"
+        log.info(f"Berhasil dari public API: {len(xlsx_rows)} baris")
+
+    if not xlsx_rows:
+        log.warning("Hasil kosong -- SKIP, gak replace lastXlsxRows dengan data kosong "
+                    "(jaga-jaga API lagi error/maintenance sesaat).")
         sys.exit(1)
-
-    xlsx_rows = [to_xlsx_row(e, i) for i, e in enumerate(completed) if e.get("symbol") and e.get("date")]
-    skipped = len(completed) - len(xlsx_rows)
-    if skipped:
-        log.warning(f"{skipped} entry di-skip (symbol/date kosong)")
 
     payload = load_current_payload()
     prev_count = len(payload.get("lastXlsxRows") or [])
     payload["lastXlsxRows"] = xlsx_rows
     save_payload(payload)
 
-    log.info(f"Selesai: lastXlsxRows diganti dari {prev_count} baris -> {len(xlsx_rows)} baris")
+    log.info(f"Selesai (sumber: {source_used}): lastXlsxRows diganti dari "
+              f"{prev_count} baris -> {len(xlsx_rows)} baris")
 
 
 if __name__ == "__main__":

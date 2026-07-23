@@ -28,23 +28,52 @@ Selain automasi Telegram (`ingest.py`), ada 1 automasi lagi: **`sync_journal.py`
 XLSX → upload ke IDXSY Signal". Ini yang ngisi status **SL HIT** & **EXPIRED**
 (yang emang gak pernah dipost di Telegram).
 
-**Jauh lebih simpel dari yang dikira** — ternyata dashboard `idx-journal.zeta-ai.pro`
-punya endpoint JSON publik statis (`/api/idx-signals.json`, ditemukan lewat
-DevTools Network tab), jadi **gak perlu Playwright/headless browser sama
-sekali**, cukup HTTP request biasa.
+### 2 sumber data, PREFER yang lebih lengkap
 
-**Gak butuh secret baru** — script ini reuse `SUPABASE_URL`,
-`SUPABASE_SERVICE_KEY`, `SUPABASE_USER_ID` yang sudah kamu isi sebelumnya
-buat automasi Telegram. Gak ada login/credential Zeta yang perlu disimpan
-(dashboard-nya publik).
+Ternyata endpoint publik (`idx-journal.zeta-ai.pro`) **gak lengkap** — ada
+banyak record yang ke-drop, terutama status **SL HIT** (berhenti muncul
+total sejak 2026-06-26, padahal transaksi terus jalan). Ketauan setelah
+bandingin langsung sama `member.zeta-ai.pro` (versi lengkap yang butuh
+login) — contoh nyata: **PACK (SL HIT, 21 Juli)** ada di member, TIDAK ADA
+di publik.
 
-**Cara kerja**: fetch `completed[]` dari JSON API itu, convert ke format yang
-sama persis dengan yang diharapkan `mergeWithXlsxData()` di `idx_signal.html`,
-lalu **replace total** `trades_data.payload.lastXlsxRows` (bukan
-append/dedupe — sama seperti upload XLSX manual, yang juga selalu replace
-total tiap upload). **Gak perlu update `idx_signal.html` lagi** — patch yang
-sudah ada (v1.5) otomatis re-merge pakai `lastXlsxRows` apa pun isinya,
-setiap kali app di-load dari cloud.
+Makanya script ini sekarang punya 2 sumber, **prefer member** (lebih
+lengkap), fallback ke publik kalau member gagal/belum di-setup:
+
+1. **Member** (`member.zeta-ai.pro/api/signals`) — butuh cookie
+   `zeta_member=...`. **Bukan username/password akun kamu** — cuma
+   passphrase/kode akses statis (kelihatan dari namanya, `zetamemberjuly2026`,
+   kemungkinan besar **rotate tiap bulan**).
+2. **Publik** (`idx-journal.zeta-ai.pro/api/idx-signals.json`) — fallback,
+   tanpa login, tapi data gak lengkap.
+
+### Secret tambahan: `ZETA_MEMBER_COOKIE`
+
+Cara dapetin value-nya:
+1. Buka https://member.zeta-ai.pro/ di browser (sambil login)
+2. DevTools (F12) → tab **Network** → filter **Fetch/XHR**
+3. Refresh halaman, cari request **`signals`**
+4. Tab **Headers** → **Request Headers** → cari baris **`Cookie`**
+5. Copy **seluruh value**-nya (format: `zeta_member=xxxxxxxxxxxxx`)
+6. Simpan sebagai GitHub Secret **`ZETA_MEMBER_COOKIE`**
+
+**Penting**: kemungkinan besar perlu di-**update manual tiap awal bulan**
+(cookie-nya kelihatan encode nama bulan). Kalau automasi mendadak gagal
+dengan error "Auth gagal" di log, itu tandanya — ulangi langkah di atas buat
+dapetin cookie baru.
+
+Kalau secret ini **gak diisi sama sekali**, script otomatis fallback ke
+sumber publik (tetap jalan, cuma datanya kurang lengkap seperti sebelumnya).
+
+### Cara kerja
+
+Fetch data status final trade, convert ke format yang sama persis dengan
+yang diharapkan `mergeWithXlsxData()` di `idx_signal.html`, lalu **replace
+total** `trades_data.payload.lastXlsxRows` (bukan append/dedupe — sama
+seperti upload XLSX manual, yang juga selalu replace total tiap upload).
+**Gak perlu update `idx_signal.html` lagi** — patch yang sudah ada (v1.5)
+otomatis re-merge pakai `lastXlsxRows` apa pun isinya, setiap kali app
+di-load dari cloud.
 
 Jadwalnya disesuaikan sama waktu Zeta AI ngaku sistem audit mereka jalan
 (22:00, 01:00, 08:00 WIB) — asumsinya itu pas status SL HIT/EXPIRED di-update
