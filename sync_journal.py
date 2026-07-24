@@ -212,9 +212,15 @@ def main():
         try:
             log.info(f"Fetch {MEMBER_API_URL} (sumber utama, lebih lengkap)")
             raw = fetch_member_signals()
-            # Endpoint ini isinya SEMUA sinyal (aktif + selesai) jadi 1 list -- filter
-            # cuma yang udah ada status final-nya (resolved), bukan yang masih open.
-            completed = [e for e in raw if e.get("status")]
+            # PENTING: endpoint ini ngasih SEMUA sinyal (aktif + selesai) dalam 1 list,
+            # dibedain lewat field `status`. Sinyal yang MASIH AKTIF status-nya "OPEN"
+            # (bukan null/kosong!) -- jadi filter "asal ada status" itu SALAH, malah
+            # ikut nangkep yang masih jalan juga. Cuma terima status yang genuinely
+            # FINAL (ada di STATUS_MAP) -- yang lain (termasuk "OPEN") di-skip total,
+            # karena kalau "OPEN" ke-passthrough ke lastXlsxRows, dia bakal NIMPA status
+            # RUNNING yang benar (dari Telegram) jadi "OPEN" mentah yang gak dikenal
+            # badge manapun di idx_signal.html.
+            completed = [e for e in raw if e.get("status") in STATUS_MAP]
             xlsx_rows = [to_xlsx_row_member(e, i) for i, e in enumerate(completed)
                          if e.get("symbol") and e.get("timestamp")]
             source_used = "member"
@@ -225,6 +231,10 @@ def main():
     if xlsx_rows is None:
         log.info(f"Fetch {PUBLIC_API_URL} (fallback, TANPA login tapi kurang lengkap)")
         completed = fetch_public_journal()
+        # Defensif: walau endpoint publik ini SUDAH namanya "completed" (kemungkinan
+        # sudah pre-filtered oleh Zeta), tetap jaga-jaga cuma terima status FINAL yang
+        # dikenal -- sama alasannya kayak jalur member (lihat komentar di atas).
+        completed = [e for e in completed if e.get("status") in STATUS_MAP]
         xlsx_rows = [to_xlsx_row_public(e, i) for i, e in enumerate(completed)
                      if e.get("symbol") and e.get("date")]
         source_used = "public"
