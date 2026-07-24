@@ -482,7 +482,16 @@ def main():
             elif cat == "regime":
                 new_regimes.append(parse_regime(text, m.id, date_iso))
             else:
-                new_others.append({"msg_id": m.id, "date": date_iso, "type": "OTHER", "raw_text": text})
+                # PENTING: renderOther() di idx_signal.html expect field `text` dan
+                # `from` (BUKAN `raw_text`) -- salah nama field bikin `o.text.replace(...)`
+                # crash (TypeError: Cannot read properties of undefined) pas render.
+                new_others.append({
+                    "msg_id": m.id,
+                    "date": date_iso,
+                    "type": "OTHER",
+                    "from": "Zeta AI Group",
+                    "text": text,
+                })
             max_id_seen = max(max_id_seen, m.id)
         except Exception as e:
             # Poison-message safety: 1 pesan format aneh TIDAK BOLEH nge-block semua
