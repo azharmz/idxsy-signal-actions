@@ -85,6 +85,22 @@ def wib_string_to_wita_date(date_str):
     wita = naive + timedelta(hours=1)
     return wita.strftime("%Y-%m-%d")
 
+
+def wib_string_to_wita_datetime(date_str):
+    """Sama seperti wib_string_to_wita_date(), tapi ngasih timestamp LENGKAP (bukan cuma
+    tanggal) dalam format naive yang sama persis kayak signals[]/results[] (WITA, tanpa
+    offset). Dipakai buat resolved_at -- ini butuh presisi jam/menit, bukan cuma tanggal,
+    supaya perhitungan duration_days di idx_signal.html akurat (browser user itu WITA,
+    jadi new Date(string) bakal salah 1 jam kalau string-nya masih WIB mentah)."""
+    if not date_str:
+        return None
+    try:
+        naive = datetime.strptime(date_str[:19], "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    wita = naive + timedelta(hours=1)
+    return wita.strftime("%Y-%m-%dT%H:%M:%S")
+
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
 SUPABASE_USER_ID = os.environ["SUPABASE_USER_ID"]
@@ -144,6 +160,9 @@ def to_xlsx_row_member(entry, uid):
         "tp": entry.get("take_profit"),
         "status": status,
         "return_pct": return_pct,
+        "resolved_at": wib_string_to_wita_datetime(entry.get("resolved_at")),  # WITA naive,
+            # presisi kapan trade ini resmi selesai (dari Zeta langsung) -- dipakai
+            # idx_signal.html buat hitung durasi akurat, gantiin estimasi kasar jam 17:30
     }
 
 
@@ -170,6 +189,8 @@ def to_xlsx_row_public(entry, uid):
         "tp": entry.get("tp"),
         "status": status,
         "return_pct": return_pct,
+        "resolved_at": wib_string_to_wita_datetime(entry.get("resolved_at")),  # biasanya gak ada
+            # di public API, tapi jaga-jaga kalau suatu saat ditambahin
     }
 
 
