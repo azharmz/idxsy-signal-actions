@@ -87,6 +87,36 @@ buat yang `.yml`):
 Testing-nya sama: **Actions → zeta-journal-sync → Run workflow** (manual),
 cek hasilnya di Supabase, baru biarin jadwal otomatis jalan.
 
+## Automasi ke-3: Recompute trades[] (pure Python, gak perlu browser)
+
+Ada 1 automasi lagi: **`recompute_trades.py`** — menyelesaikan masalah
+"`trades_data.payload.trades[]` di database tetap basi kalau gak ada yang
+buka `idx_signal.html` di browser". Awalnya saya coba pendekatan headless
+browser (Playwright) buat mancing `idx_signal.html` ngitung sendiri, tapi
+setelah dipikir ulang itu muter jauh untuk sesuatu yang bisa dikerjain
+langsung di Python. Jadi 3 fungsi JS (`matchTrades`, `mergeWithXlsxData`,
+`preserveXlsxMergeAcrossJsonUpdate`) di-**port 1:1 ke Python** dan sudah
+divalidasi hasilnya identik dengan output JS (dicek terhadap data live,
+termasuk kasus SL HIT dengan `resolved_at`, TP HIT dengan durasi dari
+pesan konfirmasi, dst — semua cocok).
+
+**Gak butuh secret baru** — reuse `SUPABASE_URL`/`SUPABASE_SERVICE_KEY`/`SUPABASE_USER_ID`
+yang sudah ada. **Gak ada dependency tambahan** (gak perlu Playwright/Chromium).
+
+Script ini **sudah otomatis ke-panggil** sebagai step tambahan di akhir
+`telegram-ingest.yml` dan `zeta-journal-sync.yml` — jadi tiap kali salah
+satu dari 2 automasi itu jalan (baik terjadwal maupun manual), `trades[]`
+otomatis ke-recompute & ke-push ke database abis itu. Gak perlu workflow
+terpisah, gak perlu jadwal tambahan.
+
+**Catatan penting**: kalau logic `matchTrades`/`mergeWithXlsxData`/
+`preserveXlsxMergeAcrossJsonUpdate` di `idx_signal.html` diubah lagi di
+masa depan, port di `recompute_trades.py` HARUS ikut diupdate manual —
+gak ada mekanisme otomatis yang jaga 2 sisi ini tetap sinkron.
+
+File tambahan yang perlu di-drop ke repo:
+- `recompute_trades.py` (di root, sejajar `ingest.py`/`sync_journal.py`)
+
 ## File yang sudah disiapkan
 
 | File | Isi |
