@@ -48,8 +48,5 @@ jobs:
           SUPABASE_USER_ID: ${{ secrets.SUPABASE_USER_ID }}
           BACKFILL_SINCE_DAYS: ${{ inputs.backfill_days }}
 
-      - run: python recompute_trades.py
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          SUPABASE_USER_ID: ${{ secrets.SUPABASE_USER_ID }}
+      # recompute_trades.py dipanggil sebagai helper oleh ingest.py.
+      # Dengan begitu satu run hanya menulis payload JSONB besar sekali.
