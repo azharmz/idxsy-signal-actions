@@ -29,6 +29,8 @@ menang/overwrite kalau ada duplikat).
 import os
 import re
 import sys
+import json
+import time
 import logging
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
@@ -409,6 +411,18 @@ def load_current_payload():
 
 
 def save_payload(payload):
+    # trades_data.payload is a large JSONB document. By default, PostgREST
+    # returns the inserted/updated row, which would serialize and send the
+    # entire payload back to this worker after the write. We only need to know
+    # whether the write succeeded, so request a minimal response.
+    payload_bytes = len(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    )
+    started = time.monotonic()
+    log.info(
+        "Menyimpan trades_data: payload=%s bytes; response=minimal",
+        payload_bytes,
+    )
     sb.table("trades_data").upsert(
         {
             "user_id": SUPABASE_USER_ID,
@@ -416,7 +430,9 @@ def save_payload(payload):
             "updated_at": datetime.now(timezone.utc).isoformat(),
         },
         on_conflict="user_id",
+        returning="minimal",
     ).execute()
+    log.info("Penyimpanan trades_data selesai dalam %.2f detik", time.monotonic() - started)
 
 
 # ---------------------------------------------------------------------------
