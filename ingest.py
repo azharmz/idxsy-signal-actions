@@ -420,8 +420,13 @@ def save_payload(payload):
     )
     started = time.monotonic()
     log.info(
-        "Menyimpan trades_data: payload=%s bytes; response=minimal",
+        "Menyimpan trades_data: payload=%s bytes; signals=%s results=%s "
+        "regimes=%s others=%s; response=minimal",
         payload_bytes,
+        len(payload.get("signals", [])),
+        len(payload.get("results", [])),
+        len(payload.get("regimes", [])),
+        len(payload.get("others", [])),
     )
     sb.table("trades_data").upsert(
         {
