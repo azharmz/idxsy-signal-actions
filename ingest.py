@@ -475,9 +475,12 @@ def main():
         messages = list(client.iter_messages(TG_GROUP_ID, **iter_kwargs))
 
     log.info(f"Ambil {len(messages)} pesan baru")
-    # Tetap lanjut meski tidak ada pesan baru: status trade (mis. RUNNING/NO RESULT)
-    # perlu dihitung ulang berkala berdasarkan usia sinyal, tetapi payload hanya
-    # akan ditulis sekali pada akhir run.
+    # Tidak ada pesan baru berarti signals/results dan tanggal maksimum tidak berubah.
+    # Status trade dihitung dari data yang sudah tersimpan, bukan jam saat ini; karena
+    # itu recompute tidak mengubah hasil dan kita hindari rewrite payload JSONB ~4 MB.
+    if not messages:
+        log.info("Tidak ada pesan baru; payload dan cursor tidak perlu ditulis ulang.")
+        return
 
     for m in messages:
         # PENTING: pakai raw_text, BUKAN m.text. Telethon `.text` merender ulang pesan
