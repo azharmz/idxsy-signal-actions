@@ -30,6 +30,8 @@ JS selama gak ada yang nyampur timezone-aware datetime ke dalam sini.
 """
 
 import os
+import json
+import time
 import logging
 from datetime import datetime, timedelta
 
@@ -315,6 +317,15 @@ def main():
 
     payload["trades"] = trades
 
+    payload_bytes = len(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    )
+    started = time.monotonic()
+    log.info(
+        "Menyimpan hasil recompute: payload=%s bytes; trades=%s; response=minimal",
+        payload_bytes,
+        len(trades),
+    )
     sb.table("trades_data").upsert(
         {
             "user_id": supabase_user_id,
@@ -322,7 +333,9 @@ def main():
             "updated_at": datetime.now().astimezone().isoformat(),
         },
         on_conflict="user_id",
+        returning="minimal",
     ).execute()
+    log.info("Penyimpanan hasil recompute selesai dalam %.2f detik", time.monotonic() - started)
 
     status_counts = {}
     for t in trades:
