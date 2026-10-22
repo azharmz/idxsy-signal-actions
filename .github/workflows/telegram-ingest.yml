@@ -1,6 +1,9 @@
 name: telegram-ingest
 
 on:
+  push:
+    paths:
+      - 'recompute_trades.py'
   schedule:
     # === Sesi PAGI (06:00-10:45 WITA = 22:00-02:45 UTC) ===
     # Bagian 1: 22:00-23:55 UTC, hari SEBELUM hari bursa WITA
