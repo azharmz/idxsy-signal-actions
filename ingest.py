@@ -8,10 +8,10 @@ parsing pakai logic yang di-port 1:1 dari `idx_signal.html`, lalu APPEND ke
 — TUJUANNYA MENGGANTIKAN UPLOAD JSON MANUAL sepenuhnya.
 
 PENTING soal arsitektur:
-  Script ini SENGAJA TIDAK menghitung ulang `payload.trades[]` (hasil
-  matching sinyal<->konfirmasi + merge status XLSX). Logic itu (matchTrades,
-  mergeWithXlsxData, preserveXlsxMergeAcrossJsonUpdate) TETAP tinggal di
-  idx_signal.html (JS, client-side) sebagai SATU-SATUNYA sumber kebenaran —
+  Script ini menghitung ulang `payload.trades[]` dengan port Python dari logic
+  JS (matchTrades, mergeWithXlsxData, preserveXlsxMergeAcrossJsonUpdate), agar
+  ingestion dan recompute cukup melakukan SATU penulisan payload besar per run.
+  idx_signal.html tetap recompute di browser saat load dari cloud —
   supaya gak ada 2 implementasi (Python vs JS) yang bisa diam-diam divergen.
   idx_signal.html sudah dipatch (checkAndSyncFromCloud) supaya recompute
   trades[] setiap kali load dari cloud, bukan trust `p.trades` mentah-mentah.
@@ -38,6 +38,11 @@ from zoneinfo import ZoneInfo
 from telethon.sync import TelegramClient
 from telethon.sessions import StringSession
 from supabase import create_client, Client
+from recompute_trades import (
+    match_trades,
+    preserve_xlsx_merge_across_json_update,
+    merge_with_xlsx_data,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -470,8 +475,9 @@ def main():
         messages = list(client.iter_messages(TG_GROUP_ID, **iter_kwargs))
 
     log.info(f"Ambil {len(messages)} pesan baru")
-    if not messages:
-        return
+    # Tetap lanjut meski tidak ada pesan baru: status trade (mis. RUNNING/NO RESULT)
+    # perlu dihitung ulang berkala berdasarkan usia sinyal, tetapi payload hanya
+    # akan ditulis sekali pada akhir run.
 
     for m in messages:
         # PENTING: pakai raw_text, BUKAN m.text. Telethon `.text` merender ulang pesan
@@ -529,13 +535,19 @@ def main():
     payload["results"] = dedupe_by_msg_id(payload["results"], new_results)
     payload["regimes"] = dedupe_by_msg_id(payload["regimes"], new_regimes)
     payload["others"] = dedupe_by_msg_id(payload["others"], new_others)
-    # payload["trades"] SENGAJA TIDAK diubah di sini — idx_signal.html yang recompute
-    # dari signals[]/results[] setiap kali load dari cloud (lihat catatan di modul docstring).
+    # Recompute trades di memori agar ingestion + recompute hanya melakukan satu
+    # upsert payload besar. Semantik helper dipusatkan di recompute_trades.py.
+    prev_trades = payload.get("trades") or []
+    trades = match_trades(payload["signals"], payload["results"])
+    trades = preserve_xlsx_merge_across_json_update(prev_trades, trades)
+    if payload.get("lastXlsxRows"):
+        trades = merge_with_xlsx_data(trades, payload["lastXlsxRows"])
+    payload["trades"] = trades
+
     save_payload(payload)
 
-    # Cursor cuma dimajukan SETELAH payload berhasil tersimpan -- kalau save_payload()
-    # gagal (network/permission/dll), cursor TETAP di posisi lama, jadi run berikutnya
-    # otomatis retry batch yang sama (aman/idempotent karena dedupe by msg_id).
+    # Cursor cuma dimajukan SETELAH payload berhasil tersimpan. Kalau tidak ada
+    # pesan baru, max_id_seen tetap sama sehingga upsert cursor ini idempotent.
     set_last_processed_id(max_id_seen)
 
     log.info(
